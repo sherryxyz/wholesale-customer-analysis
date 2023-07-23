@@ -1,0 +1,447 @@
+---
+title: "Wholesale Consumer Segmentation with R"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### 1. Business Problem
+
+Company XYZ is a wholesale distributor that serves a number of business clients(e.g., retailers, restaurant,
+hotels, or cafes) in Portugal.The management of XYZ would like to get a deeper understanding of the spending
+patterns of their clients, so that they can make strategic decisions to better meet the clients’ demand.
+
+#### 1.1 Business Task:
+  • Identify meaningful spending patterns of Company XYZ’s wholesale clients and come up with strategies
+that better meet their client’s demand.
+
+### 2. Prepare Data
+#### 2.1 About the data
+
+• Wholesale customers dataset from Company XYZ
+• The dataset consists of 440 clients and their annual spending
+• Each record corresponds to a client, and contains a client’s region, channel, and annual spending across 6 product categories:
+      • Channel
+          1. Horeca (Hotel/Restaurant/Cafe)
+          2. Retail
+      • Region
+          1. Lisbon
+          2. Oporto
+          3. other regions
+      • Product categories
+          1. Fresh
+          2. Milk
+          3. Grocery
+          4. Frozen
+          5. Detergents_Paper
+          6. Delicatessen
+
+### 3. Process Data
+
+#### 3.1 Import data and required packages
+```{r loading_packages, message = FALSE}
+library(dplyr)
+library(arules)
+library(stats)
+library(cluster)
+library(ggplot2)
+library(factoextra)
+library(skimr)
+library(tidyr)
+```
+
+
+```{r , comment= TRUE}
+# import the dataset
+wholesale = read.csv("Wholesale customers data.csv")
+
+# Get summary of data to look at quartile
+summary(wholesale)
+
+```
+* From the summary, we get the Q1, Median, and Q3 for each product categories.
+
+#### 3.2 Data Exploration
+
+```{r }
+channel_count=wholesale %>% 
+  mutate(channel_name = case_when(Channel==1 ~ 'Hotel_Restaurant_Cafe',
+                                  Channel==2 ~ 'Retail')) %>%
+  group_by(channel_name) %>% summarise(n=n())
+
+# Plotting clients count vs channels
+ggplot(channel_count, aes(y=n,x=channel_name,fill=channel_name))+
+  geom_bar(stat='identity' ) +
+  scale_fill_manual(values = c('darkblue','cyan'))+
+  labs(x='Channel', y='total_clients')+
+  geom_text(aes(label=n),vjust=0)
+```
+```{r }
+# Plotting clients count vs region
+region_count=wholesale %>% 
+  mutate(region_name = case_when(Region==1 ~ 'Lisbon',Region==2 ~ 'Oporto',
+                                 Region==3 ~ 'Other')) %>%
+           group_by(region_name) %>% summarise(n=n())
+
+ggplot(region_count, aes(y=n,x=as.character(region_name),fill=factor(region_name)))+
+  geom_bar(stat='identity' ) +
+  scale_fill_manual(values = c('burlywood2','coral2','darkcyan'))+
+  labs(x='Region', y='total_clients')+
+  geom_text(aes(label=n),vjust=0)
+
+```  
+Overall, we found that the majority of the clients are from the 'Other' region 
+and most of the clients are from the Horeca channel. To further understand the
+relationships within the data and the grouping of the clients for focused 
+targeting, association rules and clustering analysis have been performed.
+
+
+### 4. Analyzing Data
+
+#### 4.1 Association Rule
+
+This is a technique that helps uncover interesting co-occurrence and co-purchase 
+habits. We are mainly focusing on the high spending clients (top 25% annual 
+spending for each product category), since they are the clients who bring in the
+majority of the revenue (62%).
+
+```{r}
+# 1. Utilizing association rules to identify if there's any meaningful 
+#relationship between:
+#- Annual spending of each product categories
+#- Channel and spending of each product
+#- between products
+
+#To do that, we first need to transform them into binary variables:
+#  - round(Min - Q1): considered as low spending
+# - round(Q1 - Q3): considered as medium spending
+# - round(Q3 - Max): considered as high spending
+
+# Convert all variables to binary variable in order to use Arules package. 
+wholesale_convert = wholesale %>%
+  mutate(RLisbon = ifelse(Region == 1, 1, 0),
+         ROporto = ifelse(Region == 2, 1, 0),
+         ROther = ifelse(Region == 3, 1, 0)) %>%
+  
+  mutate(CHoreca = ifelse(Channel == 1, 1, 0),
+         CRetail = ifelse(Channel == 2, 1, 0)) %>%
+  
+  mutate(FreshH = ifelse(Fresh > 17000, 1, 0),
+         FreshM = ifelse(Fresh <= 17000 & Fresh > 3100, 1, 0),
+         FreshL = ifelse(Fresh <= 3100, 1, 0)) %>%
+  
+  mutate(MilkH = ifelse(Milk > 7200, 1, 0),
+         MilkM = ifelse(Milk <= 7200 & Milk > 1500, 1, 0),
+         MilkL = ifelse(Milk <= 1500, 1, 0)) %>%
+  
+  mutate(GroceryH = ifelse(Grocery > 11000, 1, 0) ,
+         GroceryM = ifelse(Grocery <= 11000 & Grocery > 2200, 1, 0),
+         GroceryL = ifelse(Grocery <= 2200, 1, 0)) %>%
+  
+  mutate(FrozenH = ifelse(Frozen > 4000, 1, 0),
+         FrozenM = ifelse(Frozen <= 4000 & Frozen > 800, 1, 0),
+         FrozenL = ifelse(Frozen <= 800, 1, 0)) %>%
+  
+  mutate(DetergentsH = ifelse(Detergents_Paper > 4000, 1, 0),
+         DetergentsM = ifelse(Detergents_Paper <= 4000 & Detergents_Paper > 300,
+                              1, 0),
+         DetergentsL = ifelse(Detergents_Paper <= 300, 1, 0)) %>%
+  
+  mutate(DelicatessenH = ifelse(Delicatessen > 1900, 1, 0),
+         DelicatessenM = ifelse(Delicatessen <= 1900 & Delicatessen > 410, 1, 0),
+         DelicatessenL = ifelse(Delicatessen <= 410, 1, 0))
+
+whs_convertion = wholesale_convert[,9:31]
+```
+
+
+To obtain a meaningful amount of association rules, we need to set a minimum 
+support and confidence.For this data set, we set a minimum support of 20% and 
+a minimum confidence of 70%. If no rules are obtained, support%
+will be reduced to see if any meaningful rules can be found.
+
+- support percentage:fraction of transactions containing both attributes within
+the data set
+
+- confidence: the ratio of transactions having attribute A that also contains 
+the attribute B
+
+```{r }
+# When minsupport at 20% and minconfidence at 70%:
+whs = whs_convertion %>% mutate(across(,as.logical))
+whs_rules = apriori(whs, 
+                    parameter = list(supp=0.2,conf=0.7, minlen = 2))
+
+inspect(sort(whs_rules, by ='lift'))
+
+```
+
+
+We start by looking at the data region by region to find any patterns in the 
+associations.
+```{r , comment= TRUE}
+wholesale_Lisbon = whs_convertion %>% filter(RLisbon == 1)
+wholesale_Oporto = whs_convertion %>% filter(ROporto == 1)
+wholesale_Other = whs_convertion %>% filter(ROther == 1)
+
+# Region LisbonH support, confidence, and lift (still using overall data's high,
+# medium, and low levels):
+LisbonH = wholesale_Lisbon %>% select(CHoreca, CRetail, FreshH, MilkH, GroceryH,
+                                      FrozenH, DetergentsH, DelicatessenH)
+LisbonH = LisbonH %>% mutate(across(,as.logical))
+LisbonH_rules = apriori(LisbonH, parameter = list(supp=0.15,conf=0.7))
+inspect(sort(LisbonH_rules, by ='lift'))
+```
+
+Across all regions and channels, the high spending clients who buy products from
+the Milk and Detergents category are 340% more likely to purchase products from
+the Grocery category than pure chance. 
+
+Across all region, high spending clients from Retail who buy products from
+Grocery are 3 times more likely to purchase products from
+the Detergents category and vice versa than pure chance. 
+
+High spending clients who buy products from Grocery and Detergents are 3 times
+more likely to be from the Retail channel.
+
+```{r , comment= TRUE}
+# Region OportoH support, confidence, and lift (still using overall data's high,
+#medium, and low levels):
+OportoH = wholesale_Oporto %>% select(CHoreca, CRetail, FreshH, MilkH, GroceryH,
+                                      FrozenH, DetergentsH, DelicatessenH)
+OportoH = OportoH %>% mutate(across(,as.logical))
+OportoH_rules = apriori(OportoH, 
+                        parameter = list(supp=0.1,conf=0.7))
+inspect(sort(OportoH_rules, by ='lift'))
+
+```
+
+
+```{r , comment= TRUE}
+# Region OtherH support,confidence, and lift (still using overall data's high, 
+# medium, and low levels):
+OtherH = wholesale_Other %>% select(CHoreca, CRetail, FreshH, MilkH, GroceryH, 
+                                    FrozenH, DetergentsH, DelicatessenH)
+OtherH = OtherH %>% mutate(across(,as.logical))
+OtherH_rules = apriori(OtherH, 
+                       parameter = list(supp=0.1, conf=0.7, minlen = 2))
+inspect(sort(OtherH_rules, by ='lift'))
+```
+By looking at the lift values for the different regions, we found that across 
+all regions and channels, the high spending clients from the Retail channel who
+buy products from the Milk and Detergents category are 3 times more likely to 
+purchase products from the Grocery category than pure chance. 
+
+
+```{r }
+# Look into Channel regardless of regions:
+whs_Horeca =  whs_convertion %>% filter(CHoreca == 1)
+whs_Retail = whs_convertion %>% filter(CRetail == 1)
+
+
+# Horeca support,confidence, and lift:
+HorecaH = whs_Horeca %>% select(FreshH, MilkH, GroceryH, FrozenH, DetergentsH, 
+                                DelicatessenH) %>% 
+  mutate(across(,as.logical))
+HorecaH_rules = apriori(HorecaH, 
+                        parameter = list(supp=0.1, conf=0.4,minlen = 2))
+inspect(sort(HorecaH_rules, by ='lift'))
+
+# Retail support, confidence, and lift:
+RetailH = whs_Retail %>% select(FreshH, MilkH, GroceryH, FrozenH, DetergentsH, 
+                                DelicatessenH) %>% 
+  mutate(across(,as.logical))
+RetailH_rules = apriori(RetailH, 
+                        parameter = list(supp=0.4, conf=0.8, minlen = 2))
+inspect(sort(RetailH_rules, by ='lift'))
+```
+
+
+```{r }
+# Look into Channel regardless of regions:
+
+whs_Horeca =  whs_convertion %>% filter(CHoreca == 1)
+whs_Retail = whs_convertion %>% filter(CRetail == 1)
+
+```
+
+
+```{r }
+HorecaH = whs_Horeca %>% select(FreshH, MilkH, GroceryH, FrozenH, DetergentsH, DelicatessenH) %>% 
+  mutate(across(,as.logical))
+
+HorecaH_rules = apriori(HorecaH, 
+                        parameter = list(supp=0.1, conf=0.4,minlen = 2))
+
+inspect(sort(HorecaH_rules, by ='lift'))
+```
+
+For the high spenders in the Horeca channel, clients who buy products from the
+Delicatessen category are 90% more likely to purchase products from the Frozen
+category than pure chance. 
+
+```{r }
+RetailH = whs_Retail %>% select(FreshH, MilkH, GroceryH, FrozenH, DetergentsH,
+                                DelicatessenH) %>% 
+  mutate(across(,as.logical))
+
+RetailH_rules = apriori(RetailH, 
+                        parameter = list(supp=0.4, conf=0.8, minlen = 2))
+
+inspect(sort(RetailH_rules, by ='lift'))
+
+```
+For the high spenders in the Retail channel, clients who buy products from the
+Milk and Detergents category are 58% more likely to purchase products from the
+Grocery category than pure chance.
+
+
+
+
+#### 4.2 Clustering
+
+Clustering technique helps find meaningful client segments. 
+
+##### 4.2.1 Outlier Removal:
+Looking at the data, we noticed that there are a few values in each column that 
+are much greater than the rest of the values in each column. So, we plotted 
+histograms for the upper end of values in each category(from the mid point of 
+each category to the maximum value of that category) to see how the data is 
+distributed and to set an appropriate upper threshold as clustering is sensitive
+to outliers.
+```{r }
+# Converting the data to a key value format and plotting the histograms for the
+# 6 categories
+cust_data_bin = wholesale %>% filter(Fresh>(max(Fresh)/2) | Milk>(max(Milk)/2)|
+                                     Grocery>(max(Grocery)/2)|
+                                     Frozen>(max(Frozen)/2)|
+                                     Detergents_Paper>(max(Detergents_Paper)/2)|
+                                     Delicatessen>(max(Delicatessen)/2)) %>% 
+  select(Fresh,Milk,Grocery,Frozen,Detergents_Paper,Delicatessen)
+
+ggplot(gather(cust_data_bin), aes(value)) + 
+  geom_histogram(bins = 15) + 
+  facet_wrap(~key, scales = 'free_x')
+
+``` 
+
+
+##### Cleaning the data by removing the outliers and adding the names for regions and channels:
+```{r}
+cust_ol_filt = wholesale %>% 
+  filter(Fresh<65000,Milk<50000,Grocery<68000,Frozen<30000,
+         Detergents_Paper<30000,Delicatessen<20000) %>% 
+  mutate(region_name = case_when(Region==1 ~ 'Lisbon',Region==2 ~ 'Oporto',
+                                 Region==3 ~ 'Other'),
+         channel_name = case_when(Channel==1 ~ 'Horeca',
+                                  Channel==2 ~ 'Retail'))
+```
+
+##### 4.2.2 Data normalization
+##### Normalizing the data and plotting the SSE curve for finding the optimum number of clusters:
+```{r}
+# Using Min-max normalization
+normalize = function(x) {
+  return((x - min(x)) / (max(x) - min(x)))
+}
+
+cust_normalized = cust_ol_filt %>% mutate_at(c(3:8), normalize)
+distance_matrix = dist(cust_normalized[,3:8], method = 'euclidean')
+
+sse_curve = c()
+for (n in 1:10) {
+  cust_kcluster = kmeans(cust_normalized[,3:8], n)
+  sse = cust_kcluster$tot.withinss
+  sse_curve[n] = sse}
+plot(1:10, sse_curve, type = 'b')
+```
+
+We are choosing 5 clusters as it has a low SSE value and any cluster size above 
+5 gives us clusters with very sparse items.
+
+```{r}
+# Performing clustering with 5 clusters
+cust_clust = kmeans(cust_normalized[,3:8], centers = 5)
+sil_co = silhouette(cust_clust$cluster, dist = distance_matrix)
+cust_clust$centers
+summary(sil_co)
+```
+
+
+##### 4.2.3 Denormalization of values:
+Since all the values are from 0 to 1, we are denormalizing them to their actual
+amounts.
+```{r}
+cust_clust_df=as.data.frame.matrix(cust_clust$centers)
+
+# Creating a function for denormalization
+denormalize <- function(x,minval,maxval) {
+    return(x*(maxval-minval) + minval)}
+
+cust_clust_denorm=data.frame(matrix(ncol = 0, nrow = 5))
+
+# Passing each column and denormalizing the values
+for (i in 1:ncol(cust_clust_df)) {
+  max_val = max(cust_ol_filt[i+2])
+  min_val = min(cust_ol_filt[i+2])
+  cust_clust_denorm[i] = denormalize(cust_clust_df[i], min_val, max_val)
+}
+cust_clust_denorm
+```
+
+
+##### 4.2.4 Cluster Results:
+We are able to see 5 clusters with the following attributes:\
+Cluster 1: High spenders across most categories\
+Cluster 2: High Fresh and Frozen spenders.\
+Cluster 3: Low spenders across all categories.\
+Cluster 4: High Fresh spenders.\
+Cluster 5: High Grocery spenders.
+
+
+
+Based on the results of the clustering analysis, we have grouped clients into 
+the following five groups:\
+
+● High Spenders: The 19 clients from this group spend the most across all the categories.
+In addition, all these consumers belong to the Retail channel.
+
+● High Fresh and Frozen Spenders: The 44 clients from this group spend more on
+products from the ‘Fresh’ and ‘Frozen’ category than the other categories and 93% of
+them are from the Horeca channel.
+
+● Low Spenders: The 210 clients in this group spend less than other clients for all product
+categories. Among the low spenders, 89% of this group are from the Horeca channel.
+
+● High Fresh Spenders: The 62 clients from this group purchase the most amount within
+the ‘Fresh’ category amongst all clients compared to other categories. Also, 82% of this
+group of clients are from the Horeca channel.
+
+● High Grocery Spenders: The 95 clients from this group purchase more products from
+the ‘Grocery’ category compared to the other categories. 85% of them are from the Retail
+channel.
+
+
+
+### 5. Key Recommendations
+
+● When a client purchases products from one of the ‘Milk’, ‘Detergents’, and ‘Grocery’
+categories, recommend products from the other two categories which can lead to
+increased sales, especially for clients from the Retail channel. For the Horeca channel, it
+is beneficial to recommend products from the ‘Frozen’ categories when clients purchase
+products from ‘Delicatessen’. It is imperative to make sure there is no gap in the
+inventory level of these categories.
+
+
+● ‘Fresh’, ‘Frozen ', and ‘Grocery’ are the highest selling categories, therefore a minimum
+inventory threshold should be set to ensure these categories can be replenished in time.
+Furthermore, there is no need for discounts on these categories due to the high sales.
+Instead, provide discounts on ‘Delicatessen’, ‘Milk’, and ‘Detergents’ as incentive to
+increase sales.
+
+
